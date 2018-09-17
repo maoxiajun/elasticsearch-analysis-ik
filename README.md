@@ -3,7 +3,7 @@ IK Analysis for Elasticsearch
 
 The IK Analysis plugin integrates Lucene IK analyzer (http://code.google.com/p/ik-analyzer/) into elasticsearch, support customized dictionary.
 
-Analyzer: `ik_smart` , `ik_max_word` , Tokenizer: `ik_smart` , `ik_max_word` 
+Analyzer: `ik_smart` , `ik_max_word` , Tokenizer: `ik_smart` , `ik_max_word`
 
 Versions
 --------
@@ -11,8 +11,10 @@ Versions
 IK version | ES version
 -----------|-----------
 master | 6.x -> master
-6.1.1| 6.1.1
-5.6.4| 5.6.4
+6.3.0| 6.3.0
+6.2.4| 6.2.4
+6.1.3| 6.1.3
+5.6.8| 5.6.8
 5.5.3| 5.5.3
 5.4.3| 5.4.3
 5.3.3| 5.3.3
@@ -34,12 +36,18 @@ Install
 1.download or compile
 
 * optional 1 - download pre-build package from here: https://github.com/medcl/elasticsearch-analysis-ik/releases
+
+    create plugin folder `cd your-es-root/plugins/ && mkdir ik`
     
-    unzip plugin to folder `your-es-root/plugins/`
+    unzip plugin to folder `your-es-root/plugins/ik`
 
-* optional 2 - use elasticsearch-plugin to install ( version > v5.5.1 ):
+* optional 2 - use elasticsearch-plugin to install ( supported from version v5.5.1 ):
 
-    `./bin/elasticsearch-plugin install https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v6.0.0/elasticsearch-analysis-ik-6.0.0.zip`
+    ```
+    ./bin/elasticsearch-plugin install https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v6.3.0/elasticsearch-analysis-ik-6.3.0.zip
+    ```
+
+   NOTE: replace `6.3.0` to your own elasticsearch version
 
 2.restart elasticsearch
 
@@ -56,7 +64,7 @@ curl -XPUT http://localhost:9200/index
 2.create a mapping
 
 ```bash
-curl -XPOST http://localhost:9200/index/fulltext/_mapping -d'
+curl -XPOST http://localhost:9200/index/fulltext/_mapping -H 'Content-Type:application/json' -d'
 {
         "properties": {
             "content": {
@@ -65,32 +73,32 @@ curl -XPOST http://localhost:9200/index/fulltext/_mapping -d'
                 "search_analyzer": "ik_max_word"
             }
         }
-    
+
 }'
 ```
 
 3.index some docs
 
 ```bash
-curl -XPOST http://localhost:9200/index/fulltext/1 -d'
+curl -XPOST http://localhost:9200/index/fulltext/1 -H 'Content-Type:application/json' -d'
 {"content":"美国留给伊拉克的是个烂摊子吗"}
 '
 ```
 
 ```bash
-curl -XPOST http://localhost:9200/index/fulltext/2 -d'
+curl -XPOST http://localhost:9200/index/fulltext/2 -H 'Content-Type:application/json' -d'
 {"content":"公安部：各地校车将享最高路权"}
 '
 ```
 
 ```bash
-curl -XPOST http://localhost:9200/index/fulltext/3 -d'
+curl -XPOST http://localhost:9200/index/fulltext/3 -H 'Content-Type:application/json' -d'
 {"content":"中韩渔警冲突调查：韩警平均每天扣1艘中国渔船"}
 '
 ```
 
 ```bash
-curl -XPOST http://localhost:9200/index/fulltext/4 -d'
+curl -XPOST http://localhost:9200/index/fulltext/4 -H 'Content-Type:application/json' -d'
 {"content":"中国驻洛杉矶领事馆遭亚裔男子枪击 嫌犯已自首"}
 '
 ```
@@ -98,7 +106,7 @@ curl -XPOST http://localhost:9200/index/fulltext/4 -d'
 4.query with highlighting
 
 ```bash
-curl -XPOST http://localhost:9200/index/fulltext/_search  -d'
+curl -XPOST http://localhost:9200/index/fulltext/_search  -H 'Content-Type:application/json' -d'
 {
     "query" : { "match" : { "content" : "中国" }},
     "highlight" : {
@@ -228,7 +236,13 @@ mvn package
 
 3.分词测试失败
 请在某个索引下调用analyze接口测试,而不是直接调用analyze接口
-如:http://localhost:9200/your_index/_analyze?text=中华人民共和国MN&tokenizer=my_ik
+如:
+```bash
+curl -XGET "http://localhost:9200/your_index/_analyze" -H 'Content-Type: application/json' -d'
+{
+   "text":"中华人民共和国MN","tokenizer": "my_ik"
+}'
+```
 
 
 4. ik_max_word 和 ik_smart 什么区别?

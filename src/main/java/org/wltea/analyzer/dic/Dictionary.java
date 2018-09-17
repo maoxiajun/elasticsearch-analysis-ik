@@ -26,13 +26,18 @@
 package org.wltea.analyzer.dic;
 
 import java.io.BufferedReader;
-import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Files;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -44,6 +49,7 @@ import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.elasticsearch.SpecialPermission;
 import org.elasticsearch.common.io.PathUtils;
 import org.elasticsearch.common.logging.ESLoggerFactory;
 import org.elasticsearch.plugin.analysis.ik.AnalysisIkPlugin;
@@ -173,6 +179,52 @@ public class Dictionary {
 		return singleton;
 	}
 
+	private List<String> walkFileTree(List<String> files, Path path) {
+		if (Files.isRegularFile(path)) {
+			files.add(path.toString());
+		} else if (Files.isDirectory(path)) try {
+			Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
+				@Override
+				public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+					files.add(file.toString());
+					return FileVisitResult.CONTINUE;
+				}
+				@Override
+				public FileVisitResult visitFileFailed(Path file, IOException e) {
+					logger.error("[Ext Loading] listing files", e);
+					return FileVisitResult.CONTINUE;
+				}
+			});
+		} catch (IOException e) {
+			logger.error("[Ext Loading] listing files", e);
+		} else {
+			logger.warn("[Ext Loading] file not found: " + path);
+		}
+		return files;
+	}
+
+	private void loadDictFile(DictSegment dict, Path file, boolean critical, String name) {
+		try (InputStream is = new FileInputStream(file.toFile())) {
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(is, "UTF-8"), 512);
+			String word = br.readLine();
+			if (word != null) {
+				if (word.startsWith("\uFEFF"))
+					word = word.substring(1);
+				for (; word != null; word = br.readLine()) {
+					word = word.trim();
+					if (word.isEmpty()) continue;
+					dict.fillSegment(word.toCharArray());
+				}
+			}
+		} catch (FileNotFoundException e) {
+			logger.error("ik-analyzer: " + name + " not found", e);
+			if (critical) throw new RuntimeException("ik-analyzer: " + name + " not found!!!", e);
+		} catch (IOException e) {
+			logger.error("ik-analyzer: " + name + " loading failed", e);
+		}
+	}
+
 	public List<String> getExtDictionarys() {
 		List<String> extDictFiles = new ArrayList<String>(2);
 		String extDictCfg = getProperty(EXT_DICT);
@@ -181,8 +233,8 @@ public class Dictionary {
 			String[] filePaths = extDictCfg.split(";");
 			for (String filePath : filePaths) {
 				if (filePath != null && !"".equals(filePath.trim())) {
-					Path file = PathUtils.get(filePath.trim());
-					extDictFiles.add(file.toString());
+					Path file = PathUtils.get(getDictRoot(), filePath.trim());
+					walkFileTree(extDictFiles, file);
 
 				}
 			}
@@ -214,8 +266,8 @@ public class Dictionary {
 			String[] filePaths = extStopWordDictCfg.split(";");
 			for (String filePath : filePaths) {
 				if (filePath != null && !"".equals(filePath.trim())) {
-					Path file = PathUtils.get(filePath.trim());
-					extStopWordDictFiles.add(file.toString());
+					Path file = PathUtils.get(getDictRoot(), filePath.trim());
+					walkFileTree(extStopWordDictFiles, file);
 
 				}
 			}
@@ -343,37 +395,7 @@ public class Dictionary {
 
 		// 读取主词典文件
 		Path file = PathUtils.get(getDictRoot(), Dictionary.PATH_DIC_MAIN);
-
-		InputStream is = null;
-		try {
-			is = new FileInputStream(file.toFile());
-		} catch (FileNotFoundException e) {
-			logger.error(e.getMessage(), e);
-		}
-
-		try {
-			BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-			String theWord = null;
-			do {
-				theWord = br.readLine();
-				if (theWord != null && !"".equals(theWord.trim())) {
-					_MainDict.fillSegment(theWord.trim().toCharArray());
-				}
-			} while (theWord != null);
-
-		} catch (IOException e) {
-			logger.error("ik-analyzer", e);
-
-		} finally {
-			try {
-				if (is != null) {
-					is.close();
-					is = null;
-				}
-			} catch (IOException e) {
-				logger.error("ik-analyzer", e);
-			}
-		}
+		loadDictFile(_MainDict, file, false, "Main Dict");
 		// 加载扩展词典
 		this.loadExtDict();
 		// 加载远程自定义词库
@@ -387,44 +409,11 @@ public class Dictionary {
 		// 加载扩展词典配置
 		List<String> extDictFiles = getExtDictionarys();
 		if (extDictFiles != null) {
-			InputStream is = null;
 			for (String extDictName : extDictFiles) {
 				// 读取扩展词典文件
 				logger.info("[Dict Loading] " + extDictName);
-				Path file = PathUtils.get(getDictRoot(), extDictName);
-				try {
-					is = new FileInputStream(file.toFile());
-				} catch (FileNotFoundException e) {
-					logger.error("ik-analyzer", e);
-				}
-
-				// 如果找不到扩展的字典，则忽略
-				if (is == null) {
-					continue;
-				}
-				try {
-					BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-					String theWord = null;
-					do {
-						theWord = br.readLine();
-						if (theWord != null && !"".equals(theWord.trim())) {
-							// 加载扩展词典数据到主内存词典中
-							_MainDict.fillSegment(theWord.trim().toCharArray());
-						}
-					} while (theWord != null);
-
-				} catch (IOException e) {
-					logger.error("ik-analyzer", e);
-				} finally {
-					try {
-						if (is != null) {
-							is.close();
-							is = null;
-						}
-					} catch (IOException e) {
-						logger.error("ik-analyzer", e);
-					}
-				}
+				Path file = PathUtils.get(extDictName);
+				loadDictFile(_MainDict, file, false, "Extra Dict");
 			}
 		}
 	}
@@ -453,10 +442,17 @@ public class Dictionary {
 
 	}
 
+	private static List<String> getRemoteWords(String location) {
+		SpecialPermission.check();
+		return AccessController.doPrivileged((PrivilegedAction<List<String>>) () -> {
+			return getRemoteWordsUnprivileged(location);
+		});
+	}
+
 	/**
 	 * 从远程服务器上下载自定义词条
 	 */
-	private static List<String> getRemoteWords(String location) {
+	private static List<String> getRemoteWordsUnprivileged(String location) {
 
 		List<String> buffer = new ArrayList<String>();
 		RequestConfig rc = RequestConfig.custom().setConnectionRequestTimeout(10 * 1000).setConnectTimeout(10 * 1000)
@@ -505,80 +501,17 @@ public class Dictionary {
 
 		// 读取主词典文件
 		Path file = PathUtils.get(getDictRoot(), Dictionary.PATH_DIC_STOP);
-
-		InputStream is = null;
-		try {
-			is = new FileInputStream(file.toFile());
-		} catch (FileNotFoundException e) {
-			logger.error(e.getMessage(), e);
-		}
-
-		try {
-			BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-			String theWord = null;
-			do {
-				theWord = br.readLine();
-				if (theWord != null && !"".equals(theWord.trim())) {
-					_StopWords.fillSegment(theWord.trim().toCharArray());
-				}
-			} while (theWord != null);
-
-		} catch (IOException e) {
-			logger.error("ik-analyzer", e);
-
-		} finally {
-			try {
-				if (is != null) {
-					is.close();
-					is = null;
-				}
-			} catch (IOException e) {
-				logger.error("ik-analyzer", e);
-			}
-		}
+		loadDictFile(_StopWords, file, false, "Main Stopwords");
 
 		// 加载扩展停止词典
 		List<String> extStopWordDictFiles = getExtStopWordDictionarys();
 		if (extStopWordDictFiles != null) {
-			is = null;
 			for (String extStopWordDictName : extStopWordDictFiles) {
 				logger.info("[Dict Loading] " + extStopWordDictName);
 
 				// 读取扩展词典文件
-				file = PathUtils.get(getDictRoot(), extStopWordDictName);
-				try {
-					is = new FileInputStream(file.toFile());
-				} catch (FileNotFoundException e) {
-					logger.error("ik-analyzer", e);
-				}
-				// 如果找不到扩展的字典，则忽略
-				if (is == null) {
-					continue;
-				}
-				try {
-					BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-					String theWord = null;
-					do {
-						theWord = br.readLine();
-						if (theWord != null && !"".equals(theWord.trim())) {
-							// 加载扩展停止词典数据到内存中
-							_StopWords.fillSegment(theWord.trim().toCharArray());
-						}
-					} while (theWord != null);
-
-				} catch (IOException e) {
-					logger.error("ik-analyzer", e);
-
-				} finally {
-					try {
-						if (is != null) {
-							is.close();
-							is = null;
-						}
-					} catch (IOException e) {
-						logger.error("ik-analyzer", e);
-					}
-				}
+				file = PathUtils.get(extStopWordDictName);
+				loadDictFile(_StopWords, file, false, "Extra Stopwords");
 			}
 		}
 
@@ -611,142 +544,25 @@ public class Dictionary {
 		_QuantifierDict = new DictSegment((char) 0);
 		// 读取量词词典文件
 		Path file = PathUtils.get(getDictRoot(), Dictionary.PATH_DIC_QUANTIFIER);
-		InputStream is = null;
-		try {
-			is = new FileInputStream(file.toFile());
-		} catch (FileNotFoundException e) {
-			logger.error("ik-analyzer", e);
-		}
-		try {
-			BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-			String theWord = null;
-			do {
-				theWord = br.readLine();
-				if (theWord != null && !"".equals(theWord.trim())) {
-					_QuantifierDict.fillSegment(theWord.trim().toCharArray());
-				}
-			} while (theWord != null);
-
-		} catch (IOException ioe) {
-			logger.error("Quantifier Dictionary loading exception.");
-
-		} finally {
-			try {
-				if (is != null) {
-					is.close();
-					is = null;
-				}
-			} catch (IOException e) {
-				logger.error("ik-analyzer", e);
-			}
-		}
+		loadDictFile(_QuantifierDict, file, false, "Quantifier");
 	}
 
 	private void loadSurnameDict() {
-
 		_SurnameDict = new DictSegment((char) 0);
 		Path file = PathUtils.get(getDictRoot(), Dictionary.PATH_DIC_SURNAME);
-		InputStream is = null;
-		try {
-			is = new FileInputStream(file.toFile());
-		} catch (FileNotFoundException e) {
-			logger.error("ik-analyzer", e);
-		}
-		if (is == null) {
-			throw new RuntimeException("Surname Dictionary not found!!!");
-		}
-		try {
-			BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-			String theWord;
-			do {
-				theWord = br.readLine();
-				if (theWord != null && !"".equals(theWord.trim())) {
-					_SurnameDict.fillSegment(theWord.trim().toCharArray());
-				}
-			} while (theWord != null);
-		} catch (IOException e) {
-			logger.error("ik-analyzer", e);
-		} finally {
-			try {
-				if (is != null) {
-					is.close();
-					is = null;
-				}
-			} catch (IOException e) {
-				logger.error("ik-analyzer", e);
-			}
-		}
+		loadDictFile(_SurnameDict, file, true, "Surname");
 	}
 
 	private void loadSuffixDict() {
-
 		_SuffixDict = new DictSegment((char) 0);
 		Path file = PathUtils.get(getDictRoot(), Dictionary.PATH_DIC_SUFFIX);
-		InputStream is = null;
-		try {
-			is = new FileInputStream(file.toFile());
-		} catch (FileNotFoundException e) {
-			logger.error("ik-analyzer", e);
-		}
-		if (is == null) {
-			throw new RuntimeException("Suffix Dictionary not found!!!");
-		}
-		try {
-
-			BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-			String theWord;
-			do {
-				theWord = br.readLine();
-				if (theWord != null && !"".equals(theWord.trim())) {
-					_SuffixDict.fillSegment(theWord.trim().toCharArray());
-				}
-			} while (theWord != null);
-		} catch (IOException e) {
-			logger.error("ik-analyzer", e);
-		} finally {
-			try {
-				is.close();
-				is = null;
-			} catch (IOException e) {
-				logger.error("ik-analyzer", e);
-			}
-		}
+		loadDictFile(_SuffixDict, file, true, "Suffix");
 	}
 
 	private void loadPrepDict() {
-
 		_PrepDict = new DictSegment((char) 0);
 		Path file = PathUtils.get(getDictRoot(), Dictionary.PATH_DIC_PREP);
-		InputStream is = null;
-		try {
-			is = new FileInputStream(file.toFile());
-		} catch (FileNotFoundException e) {
-			logger.error("ik-analyzer", e);
-		}
-		if (is == null) {
-			throw new RuntimeException("Preposition Dictionary not found!!!");
-		}
-		try {
-
-			BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"), 512);
-			String theWord;
-			do {
-				theWord = br.readLine();
-				if (theWord != null && !"".equals(theWord.trim())) {
-
-					_PrepDict.fillSegment(theWord.trim().toCharArray());
-				}
-			} while (theWord != null);
-		} catch (IOException e) {
-			logger.error("ik-analyzer", e);
-		} finally {
-			try {
-				is.close();
-				is = null;
-			} catch (IOException e) {
-				logger.error("ik-analyzer", e);
-			}
-		}
+		loadDictFile(_PrepDict, file, true, "Preposition");
 	}
 
 	public void reLoadMainDict() {
